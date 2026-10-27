@@ -28,6 +28,8 @@ export function LeagueDashboard() {
     lineups,
     riders,
     getRiderQuotaUsage,
+    raceStatuses,
+    telemetry,
   } = usePalmares();
 
   const [activeTab, setActiveTab] = useState<"standings" | "schedule" | "quotas" | "rules">("standings");
@@ -54,6 +56,9 @@ export function LeagueDashboard() {
     activeLeague.participatingRaceIds.includes(r.id)
   );
 
+  const liveRace = participatingRaces.find((r) => raceStatuses[r.id] === "in_progress");
+  const currentLiveTelemetry = liveRace ? telemetry[liveRace.id] : null;
+
   const copyJoinCode = () => {
     navigator.clipboard.writeText(activeLeague.joinCode);
     setCopiedCode(true);
@@ -62,6 +67,27 @@ export function LeagueDashboard() {
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+      {/* Live In-Race Alert Banner */}
+      {liveRace && currentLiveTelemetry && (
+        <div className="bg-gradient-to-r from-red-950 via-zinc-900 to-zinc-950 border border-red-500/40 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-xl shadow-red-500/10 animate-fadeIn">
+          <div className="flex items-center gap-3">
+            <span className="w-3 h-3 rounded-full bg-red-500 animate-ping shrink-0" />
+            <div>
+              <div className="text-xs font-bold text-red-400 uppercase tracking-wider font-mono flex items-center gap-2">
+                LIVE RACE IN PROGRESS: {liveRace.name}
+                <span className="text-[10px] text-zinc-400">({currentLiveTelemetry.kmRemaining} KM to go)</span>
+              </div>
+              <div className="text-sm font-semibold text-zinc-200 mt-0.5">
+                Breakaway: {currentLiveTelemetry.groups[0]?.gapFormatted} ahead of Peloton ({currentLiveTelemetry.currentSpeedKmh} km/h)
+              </div>
+            </div>
+          </div>
+          <span className="text-xs font-mono font-bold px-3 py-1 rounded-xl bg-red-500/20 text-red-300 border border-red-500/40">
+            Feed: Tissot Telemetry
+          </span>
+        </div>
+      )}
+
       {/* League Banner */}
       <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-zinc-900 via-zinc-900 to-zinc-950 border border-zinc-800 p-6 sm:p-8 shadow-2xl">
         <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">

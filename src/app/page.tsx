@@ -6,10 +6,11 @@ import { Navbar } from "@/components/Navbar";
 import { LeagueDashboard } from "@/components/LeagueDashboard";
 import { LeagueWizard } from "@/components/LeagueWizard";
 import { CalendarView } from "@/components/CalendarView";
+import { RaceOperationsDashboard } from "@/components/RaceOperationsDashboard";
 import { JoinLeagueModal } from "@/components/JoinLeagueModal";
 
 function PalmaresApp() {
-  const [currentTab, setCurrentTab] = useState<"leagues" | "calendar" | "create">("leagues");
+  const [currentTab, setCurrentTab] = useState<"leagues" | "calendar" | "create" | "operations">("leagues");
   const [isJoinModalOpen, setIsJoinModalOpen] = useState(false);
 
   return (
@@ -23,6 +24,7 @@ function PalmaresApp() {
       <main className="flex-1 pb-16">
         {currentTab === "leagues" && <LeagueDashboard />}
         {currentTab === "calendar" && <CalendarView />}
+        {currentTab === "operations" && <RaceOperationsDashboard />}
         {currentTab === "create" && (
           <LeagueWizard
             onSuccess={() => {

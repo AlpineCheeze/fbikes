@@ -10,6 +10,7 @@ import {
   LineupSlot,
   EventLineup,
   ScoringSettings,
+  RaceStartlistEntry,
 } from "@/types";
 import {
   INITIAL_LEAGUE,
@@ -18,6 +19,17 @@ import {
   RIDERS,
   PRO_TEAMS,
 } from "@/data/seed-data";
+import {
+  generateInitialStartlist,
+  executeDnsAutoSubstitution,
+  SubstitutionEvent,
+} from "@/lib/ingestion/startlist-engine";
+import {
+  generateLiveTelemetry,
+  scoreLineupForResults,
+} from "@/lib/ingestion/telemetry-simulator";
+import { LiveRaceTelemetry, FinishResultItem } from "@/lib/ingestion/types";
+import { calculateUciPoints } from "@/lib/ingestion/uci-points";
 
 interface PalmaresContextType {
   currentUser: UserProfile;
@@ -28,7 +40,11 @@ interface PalmaresContextType {
   setActiveLeague: (league: League | null) => void;
   races: Race[];
   riders: Rider[];
-  lineups: Record<string, EventLineup>; // key: `${leagueMemberId}_${raceId}`
+  lineups: Record<string, EventLineup>;
+  startlists: Record<string, RaceStartlistEntry[]>;
+  telemetry: Record<string, LiveRaceTelemetry | null>;
+  substitutionLogs: SubstitutionEvent[];
+  raceStatuses: Record<string, "scheduled" | "locked" | "in_progress" | "completed">;
   createLeague: (data: {
     name: string;
     teamName: string;
@@ -51,6 +67,12 @@ interface PalmaresContextType {
     max: number;
     remaining: number;
   };
+  getStartlist: (raceId: string) => RaceStartlistEntry[];
+  scratchRider: (raceId: string, riderId: string, reason: string) => void;
+  triggerRolloutLockout: (raceId: string) => { substitutionsCount: number };
+  simulateLiveSituation: (raceId: string, kmRemaining: number, breakawayRiderIds: string[]) => void;
+  simulateRaceFinish: (raceId: string, finishOrderRiderIds: string[]) => void;
+  resetRaceSimulation: (raceId: string) => void;
 }
 
 const CURRENT_USER: UserProfile = {
@@ -78,7 +100,29 @@ export function PalmaresProvider({ children }: { children: React.ReactNode }) {
   );
   const [lineups, setLineups] = useState<Record<string, EventLineup>>({});
 
-  // Populate local storage if available
+  // Milestone 2 Ingestion & Telemetry State
+  const [startlists, setStartlists] = useState<Record<string, RaceStartlistEntry[]>>({});
+  const [telemetry, setTelemetry] = useState<Record<string, LiveRaceTelemetry | null>>({});
+  const [substitutionLogs, setSubstitutionLogs] = useState<SubstitutionEvent[]>([]);
+  const [raceStatuses, setRaceStatuses] = useState<
+    Record<string, "scheduled" | "locked" | "in_progress" | "completed">
+  >({});
+
+  // Seed default startlists for all races
+  useEffect(() => {
+    const initialStartlists: Record<string, RaceStartlistEntry[]> = {};
+    const initialStatuses: Record<string, "scheduled" | "locked" | "in_progress" | "completed"> = {};
+
+    RACES.forEach((race) => {
+      initialStartlists[race.id] = generateInitialStartlist(race.id, riders);
+      initialStatuses[race.id] = "scheduled";
+    });
+
+    setStartlists(initialStartlists);
+    setRaceStatuses(initialStatuses);
+  }, [riders]);
+
+  // Load saved state
   useEffect(() => {
     const savedLeagues = localStorage.getItem("palmares_leagues");
     const savedMembers = localStorage.getItem("palmares_members");
@@ -105,6 +149,10 @@ export function PalmaresProvider({ children }: { children: React.ReactNode }) {
       }
     }
   }, []);
+
+  const getStartlist = (raceId: string): RaceStartlistEntry[] => {
+    return startlists[raceId] || generateInitialStartlist(raceId, riders);
+  };
 
   const createLeague = (data: {
     name: string;
@@ -199,11 +247,10 @@ export function PalmaresProvider({ children }: { children: React.ReactNode }) {
     const max = league?.maxRiderUses ?? 3;
 
     let used = 0;
-    // Iterate over all submitted lineups for this league member
     Object.entries(lineups).forEach(([key, lineup]) => {
       if (lineup.leagueMemberId === leagueMemberId) {
         const hasRiderAsStarter = lineup.slots.some(
-          (s) => s.riderId === riderId && s.slotRole === "starter"
+          (s) => s.riderId === riderId && (s.slotRole === "starter" || s.isPromotedFromBench)
         );
         if (hasRiderAsStarter) {
           used++;
@@ -224,10 +271,8 @@ export function PalmaresProvider({ children }: { children: React.ReactNode }) {
     starters: { riderId: string; isCaptain: boolean }[],
     alternates: { riderId: string }[]
   ) => {
-    // Validate Quota
     for (const starter of starters) {
       const quota = getRiderQuotaUsage(leagueMemberId, starter.riderId);
-      // If updating existing lineup, allow if already in it
       const currentKey = `${leagueMemberId}_${raceId}`;
       const existingLineup = lineups[currentKey];
       const wasAlreadyInCurrentLineup =
@@ -288,6 +333,147 @@ export function PalmaresProvider({ children }: { children: React.ReactNode }) {
     return { success: true, message: "Lineup saved successfully!" };
   };
 
+  // Milestone 2 Actions:
+
+  const scratchRider = (raceId: string, riderId: string, reason: string) => {
+    const list = getStartlist(raceId);
+    const updated = list.map((item) => {
+      if (item.riderId === riderId) {
+        return {
+          ...item,
+          status: "dns" as const,
+          withdrawnAt: new Date().toISOString(),
+        };
+      }
+      return item;
+    });
+
+    setStartlists({
+      ...startlists,
+      [raceId]: updated,
+    });
+  };
+
+  const triggerRolloutLockout = (raceId: string) => {
+    const currentList = getStartlist(raceId);
+    const { updatedLineups, substitutionEvents } = executeDnsAutoSubstitution(
+      raceId,
+      currentList,
+      lineups
+    );
+
+    // Mark race locked & all lineups locked
+    Object.keys(updatedLineups).forEach((k) => {
+      if (updatedLineups[k].raceId === raceId) {
+        updatedLineups[k].isLocked = true;
+      }
+    });
+
+    setLineups(updatedLineups);
+    setSubstitutionLogs([...substitutionEvents, ...substitutionLogs]);
+    setRaceStatuses({
+      ...raceStatuses,
+      [raceId]: "locked",
+    });
+
+    return { substitutionsCount: substitutionEvents.length };
+  };
+
+  const simulateLiveSituation = (raceId: string, kmRemaining: number, breakawayRiderIds: string[]) => {
+    const race = races.find((r) => r.id === raceId);
+    if (!race) return;
+
+    const tele = generateLiveTelemetry(
+      raceId,
+      race.distanceKm,
+      kmRemaining,
+      breakawayRiderIds
+    );
+
+    setTelemetry({
+      ...telemetry,
+      [raceId]: tele,
+    });
+
+    setRaceStatuses({
+      ...raceStatuses,
+      [raceId]: "in_progress",
+    });
+  };
+
+  const simulateRaceFinish = (raceId: string, finishOrderRiderIds: string[]) => {
+    const race = races.find((r) => r.id === raceId);
+    if (!race) return;
+
+    const results: FinishResultItem[] = finishOrderRiderIds.map((rId, idx) => ({
+      rank: idx + 1,
+      riderId: rId,
+      timeBehindSeconds: idx === 0 ? 0 : idx * 12,
+      uciPointsEarned: calculateUciPoints(race.uciPointsScaleCode, idx + 1),
+    }));
+
+    // Score all lineups for this race
+    const updatedLineups = { ...lineups };
+    const memberPointsGained: Record<string, number> = {};
+
+    Object.entries(updatedLineups).forEach(([key, lineup]) => {
+      if (lineup.raceId === raceId) {
+        const { totalPoints, scoredSlots } = scoreLineupForResults(
+          lineup,
+          results,
+          race.uciPointsScaleCode,
+          activeLeague?.scoringSettings.captainMultiplier || 1.5
+        );
+
+        updatedLineups[key] = {
+          ...lineup,
+          totalEventPoints: totalPoints,
+          slots: lineup.slots.map((s) => {
+            const match = scoredSlots.find((sc) => sc.slotId === s.id);
+            return match ? { ...s, pointsAwarded: match.awardedPoints } : s;
+          }),
+        };
+
+        memberPointsGained[lineup.leagueMemberId] =
+          (memberPointsGained[lineup.leagueMemberId] || 0) + totalPoints;
+      }
+    });
+
+    // Update league member cumulative scores
+    const updatedMembers = leagueMembers.map((m) => {
+      const added = memberPointsGained[m.id] || 0;
+      return {
+        ...m,
+        cumulativePoints: m.cumulativePoints + added,
+      };
+    });
+
+    setLineups(updatedLineups);
+    setLeagueMembers(updatedMembers);
+    setRaceStatuses({
+      ...raceStatuses,
+      [raceId]: "completed",
+    });
+
+    localStorage.setItem("palmares_members", JSON.stringify(updatedMembers));
+    localStorage.setItem("palmares_lineups", JSON.stringify(updatedLineups));
+  };
+
+  const resetRaceSimulation = (raceId: string) => {
+    setRaceStatuses({
+      ...raceStatuses,
+      [raceId]: "scheduled",
+    });
+    setStartlists({
+      ...startlists,
+      [raceId]: generateInitialStartlist(raceId, riders),
+    });
+    setTelemetry({
+      ...telemetry,
+      [raceId]: null,
+    });
+  };
+
   return (
     <PalmaresContext.Provider
       value={{
@@ -300,10 +486,20 @@ export function PalmaresProvider({ children }: { children: React.ReactNode }) {
         races,
         riders,
         lineups,
+        startlists,
+        telemetry,
+        substitutionLogs,
+        raceStatuses,
         createLeague,
         joinLeague,
         saveLineup,
         getRiderQuotaUsage,
+        getStartlist,
+        scratchRider,
+        triggerRolloutLockout,
+        simulateLiveSituation,
+        simulateRaceFinish,
+        resetRaceSimulation,
       }}
     >
       {children}

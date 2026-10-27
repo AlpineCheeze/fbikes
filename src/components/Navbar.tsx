@@ -2,11 +2,11 @@
 
 import React from "react";
 import { usePalmares } from "@/context/palmares-context";
-import { Trophy, Calendar, Users, PlusCircle, ShieldCheck } from "lucide-react";
+import { Trophy, Calendar, Users, PlusCircle, ShieldCheck, Radio } from "lucide-react";
 
 interface NavbarProps {
-  currentTab: "leagues" | "calendar" | "create";
-  setCurrentTab: (tab: "leagues" | "calendar" | "create") => void;
+  currentTab: "leagues" | "calendar" | "create" | "operations";
+  setCurrentTab: (tab: "leagues" | "calendar" | "create" | "operations") => void;
   onOpenJoinModal: () => void;
 }
 
@@ -75,6 +75,17 @@ export function Navbar({ currentTab, setCurrentTab, onOpenJoinModal }: NavbarPro
           >
             <PlusCircle className="w-4 h-4" />
             Create League
+          </button>
+          <button
+            onClick={() => setCurrentTab("operations")}
+            className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-sm font-medium transition-all ${
+              currentTab === "operations"
+                ? "bg-emerald-500 text-zinc-950 font-semibold shadow-sm"
+                : "text-emerald-400/90 hover:text-emerald-300"
+            }`}
+          >
+            <Radio className="w-4 h-4" />
+            Race Ingestion Ops
           </button>
         </nav>
 
